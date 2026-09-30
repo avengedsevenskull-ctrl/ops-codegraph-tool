@@ -591,10 +591,18 @@ interface SignatureResult {
  * `diff.oldRanges` (which is pre-change/old-file and would only line up
  * with `db` by coincidence once a hunk changes the file's total line
  * count). See issues #1732 and #1737.
+ *
+ * `changedEdits` (same new-file coordinate space, same start/end as
+ * `changedRanges`) distinguishes a declaration that was *modified* from one
+ * that is merely *new*: a run whose `removedText` is empty is a pure
+ * insertion, so any exported symbol on it did not exist at the base ref and
+ * cannot be a signature change. Without this, appending a new export trips
+ * the predicate. See issue #2674.
  */
 export function checkNoSignatureChanges(
   db: BetterSqlite3Database,
   changedRanges: Map<string, DiffRange[]>,
+  changedEdits: Map<string, DiffTextEdit[]>,
   noTests: boolean,
 ): SignatureResult {
   const violations: SignatureViolation[] = [];
@@ -615,10 +623,16 @@ export function checkNoSignatureChanges(
         `SELECT name, kind, file, line FROM nodes WHERE file = ? AND kind IN ('function', 'method', 'class') AND exported = 1 ORDER BY line`,
       )
       .all(file) as SignatureViolation[];
+    const edits = changedEdits.get(file) ?? [];
 
     for (const def of defs) {
       for (const range of ranges) {
         if (def.line >= range.start && def.line <= range.end) {
+          // A pure insertion (`removedText` empty) means the declaration is
+          // new at this diff's base ref — an added export, not a modified
+          // one. Only a declaration that replaced existing text flags. #2674
+          const edit = edits.find((e) => e.start === range.start && e.end === range.end);
+          if (edit && edit.removedText.length === 0) break;
           violations.push({
             name: def.name,
             kind: def.kind,
@@ -915,7 +929,12 @@ function runPredicates(
     // flag/config and lets existing consumers of the 'signatures' predicate
     // (the pre-commit hook, `codegraph check --json`) pick up the new
     // violations with no wiring changes.
-    const editedResult = checkNoSignatureChanges(db, diff.changedRanges, noTests);
+    const editedResult = checkNoSignatureChanges(
+      db,
+      diff.changedRanges,
+      diff.changedEdits,
+      noTests,
+    );
     const deletedResult = checkNoDeletedExportsInUse(db, diff.deletedFiles, noTests);
     predicates.push({
       name: 'signatures',
