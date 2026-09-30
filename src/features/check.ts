@@ -584,6 +584,11 @@ interface SignatureResult {
   violations: SignatureViolation[];
 }
 
+/** Escape a symbol name for literal use inside a RegExp. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * `db` reflects the current working-tree (post-change) file content, so
  * `nodes.line` values are in new-file coordinates. `changedRanges` must be
@@ -593,11 +598,11 @@ interface SignatureResult {
  * count). See issues #1732 and #1737.
  *
  * `changedEdits` (same new-file coordinate space, same start/end as
- * `changedRanges`) distinguishes a declaration that was *modified* from one
- * that is merely *new*: a run whose `removedText` is empty is a pure
- * insertion, so any exported symbol on it did not exist at the base ref and
- * cannot be a signature change. Without this, appending a new export trips
- * the predicate. See issue #2674.
+ * `changedRanges`) is the base-ref evidence: a declaration is only a
+ * *modification* if a symbol of the same name appears in one of the file's
+ * removed lines. Additions, renames, and newly-exported names — none of
+ * which existed under that name at the base ref — are skipped. Without this,
+ * appending or renaming an export trips the predicate. See issue #2674.
  */
 export function checkNoSignatureChanges(
   db: BetterSqlite3Database,
@@ -623,16 +628,23 @@ export function checkNoSignatureChanges(
         `SELECT name, kind, file, line FROM nodes WHERE file = ? AND kind IN ('function', 'method', 'class') AND exported = 1 ORDER BY line`,
       )
       .all(file) as SignatureViolation[];
-    const edits = changedEdits.get(file) ?? [];
+    const edits = changedEdits.get(file);
 
     for (const def of defs) {
+      // A declaration can only be *modified* if a symbol of the same name
+      // existed at the base ref. A name absent from every removed line is a
+      // new export — an append, a rename, or a promotion — not a signature
+      // change. With no edit runs for this file the diff carries no base-ref
+      // evidence, so fall back to flagging. See #2674.
+      if (edits && edits.length > 0) {
+        const nameRe = new RegExp(`(^|[^A-Za-z0-9_$])${escapeRegExp(def.name)}([^A-Za-z0-9_$]|$)`);
+        const existedAtBase = edits.some((edit) =>
+          edit.removedText.some((line) => nameRe.test(line)),
+        );
+        if (!existedAtBase) continue;
+      }
       for (const range of ranges) {
         if (def.line >= range.start && def.line <= range.end) {
-          // A pure insertion (`removedText` empty) means the declaration is
-          // new at this diff's base ref — an added export, not a modified
-          // one. Only a declaration that replaced existing text flags. #2674
-          const edit = edits.find((e) => e.start === range.start && e.end === range.end);
-          if (edit && edit.removedText.length === 0) break;
           violations.push({
             name: def.name,
             kind: def.kind,

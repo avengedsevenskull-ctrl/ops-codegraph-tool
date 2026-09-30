@@ -897,6 +897,32 @@ describe('checkNoSignatureChanges', () => {
     expect(result.passed).toBe(true);
     expect(result.violations).toEqual([]);
   });
+
+  test('regression: renamed/newly-exported names sharing a hunk with removals are not flagged (issue #2674)', () => {
+    // Base exported only `register`. The diff renames it to `registerPanel`
+    // and adds `subscribeComposition`. The added run is paired with removed
+    // text, so `removedText` is NOT empty — the pure-insertion hedge alone
+    // was insufficient. Neither new name existed at the base ref.
+    insertNode(db, 'registerPanel', 'function', 'src/rename.js', 1, 3, 1);
+    insertNode(db, 'subscribeComposition', 'function', 'src/rename.js', 2, 4, 1);
+
+    const diff = [
+      '--- a/src/rename.js',
+      '+++ b/src/rename.js',
+      '@@ -1,1 +1,2 @@',
+      '-function register(id) {',
+      '+export function registerPanel(id) {',
+      '+export function subscribeComposition() {}',
+    ].join('\n');
+
+    const { changedRanges, changedEdits } = parseDiffOutput(diff);
+    expect(changedRanges.get('src/rename.js')).toEqual([{ start: 1, end: 2 }]);
+    expect(changedEdits.get('src/rename.js')?.[0].removedText).toEqual(['function register(id) {']);
+
+    const result = checkNoSignatureChanges(db, changedRanges, changedEdits, false);
+    expect(result.passed).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
 });
 
 // ─── checkNoDeletedExportsInUse (issue #1806) ──────────────────────────
